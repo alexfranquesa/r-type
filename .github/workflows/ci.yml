@@ -1,0 +1,368 @@
+# =============================================================================
+# CI/CD Pipeline para R-Type (C++ con CMake + vcpkg + SFML)
+# =============================================================================
+# Estrategia:
+# 1. Build Ubuntu PRIMERO (fail-fast)
+# 2. Solo si Ubuntu pasa → Build Windows
+# 3. vcpkg manifest mode (vcpkg.json)
+# 4. SFML con runtime dinámico /MD en Windows (evita mismatch MT/MD)
+# 5. Tests con CTest --output-on-failure
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, dev ]
+
+env:
+  # Versiones y configuración global
+  CMAKE_VERSION: "3.27.0"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  # ===========================================================================
+  # JOB 1: BUILD Y TEST EN UBUNTU (Linux x64)
+  # ===========================================================================
+  build-ubuntu:
+    name: "🐧 Ubuntu 22.04 - Release Build + Tests"
+    runs-on: ubuntu-22.04
+    
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. CHECKOUT con submodules (vcpkg incluido)
+      # -----------------------------------------------------------------------
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. INSTALAR DEPENDENCIAS DEL SISTEMA (SFML requiere X11, OpenGL, etc.)
+      # -----------------------------------------------------------------------
+      - name: "📦 Install system dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libx11-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libudev-dev \
+            libgl1-mesa-dev \
+            libflac-dev \
+            libogg-dev \
+            libvorbis-dev \
+            libvorbisenc2 \
+            libvorbisfile3 \
+            libopenal-dev \
+            libfreetype-dev \
+            xvfb
+
+      # -----------------------------------------------------------------------
+      # 3. SETUP VCPKG BINARY CACHING (para acelerar builds)
+      # -----------------------------------------------------------------------
+      - name: "⚡ Setup vcpkg binary caching"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # -----------------------------------------------------------------------
+      # 4. CACHE DE VCPKG (packages compilados)
+      # -----------------------------------------------------------------------
+      - name: "💾 Cache vcpkg packages"
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg
+            vcpkg_installed
+          key: vcpkg-linux-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-linux-
+
+      # -----------------------------------------------------------------------
+      # 5. BOOTSTRAP VCPKG (compilar vcpkg si no está cacheado)
+      # -----------------------------------------------------------------------
+      - name: "🔧 Bootstrap vcpkg"
+        run: |
+          if [ ! -f "vcpkg/vcpkg" ]; then
+            echo "vcpkg no encontrado, clonando y bootstrapping..."
+            if [ ! -d "vcpkg" ]; then
+              git clone https://github.com/microsoft/vcpkg.git
+            fi
+            ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          else
+            echo "vcpkg ya disponible (cache hit)"
+          fi
+          ./vcpkg/vcpkg version
+
+      # -----------------------------------------------------------------------
+      # 6. INSTALAR DEPENDENCIAS via vcpkg manifest mode
+      # -----------------------------------------------------------------------
+      - name: "📚 Install vcpkg dependencies (manifest mode)"
+        run: |
+          ./vcpkg/vcpkg install --triplet=x64-linux
+
+      # -----------------------------------------------------------------------
+      # 7. CONFIGURE con CMake preset (linux-release)
+      # -----------------------------------------------------------------------
+      - name: "⚙️ Configure CMake (linux-release preset)"
+        run: |
+          cmake --preset linux-release
+
+      # -----------------------------------------------------------------------
+      # 8. BUILD
+      # -----------------------------------------------------------------------
+      - name: "🔨 Build project"
+        run: |
+          cmake --build --preset linux-release --parallel $(nproc)
+
+      # -----------------------------------------------------------------------
+      # 9. RUN TESTS con xvfb (SFML necesita display virtual)
+      # -----------------------------------------------------------------------
+      - name: "🧪 Run tests (CTest)"
+        run: |
+          xvfb-run -a ctest --preset linux-release --output-on-failure --verbose
+        continue-on-error: false
+
+      # -----------------------------------------------------------------------
+      # 10. PREPARAR ARTEFACTOS (binarios)
+      # -----------------------------------------------------------------------
+      - name: "📦 Prepare binaries for upload"
+        run: |
+          mkdir -p artifacts
+          cp build/linux-release/rtype_server artifacts/
+          cp build/linux-release/rtype_client artifacts/
+          cp build/linux-release/rtype_tests artifacts/ || true
+          chmod +x artifacts/*
+          ls -lah artifacts/
+
+      # -----------------------------------------------------------------------
+      # 11. UPLOAD ARTEFACTOS
+      # -----------------------------------------------------------------------
+      - name: "⬆️ Upload Linux binaries"
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtype-linux-x64-${{ github.sha }}
+          path: artifacts/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 12. UPLOAD BUILD LOGS (en caso de fallo)
+      # -----------------------------------------------------------------------
+      - name: "📄 Upload build logs (on failure)"
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-linux-${{ github.sha }}
+          path: |
+            build/linux-release/CMakeFiles/CMakeOutput.log
+            build/linux-release/CMakeFiles/CMakeError.log
+            build/linux-release/Testing/Temporary/LastTest.log
+          retention-days: 3
+
+  # ===========================================================================
+  # JOB 2: BUILD Y TEST EN WINDOWS (solo si Ubuntu pasa)
+  # ===========================================================================
+  build-windows:
+    name: "🪟 Windows Server 2022 - Release Build + Tests"
+    runs-on: windows-2022
+    needs: build-ubuntu  # ← DEPENDENCIA ESTRICTA: solo corre si Ubuntu pasa
+    
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. CHECKOUT
+      # -----------------------------------------------------------------------
+      - name: "📥 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. SETUP MSVC ENVIRONMENT (Visual Studio 2022)
+      # -----------------------------------------------------------------------
+      - name: "🛠️ Setup MSVC Developer Environment"
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # -----------------------------------------------------------------------
+      # 3. SETUP VCPKG BINARY CACHING
+      # -----------------------------------------------------------------------
+      - name: "⚡ Setup vcpkg binary caching"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # -----------------------------------------------------------------------
+      # 4. CACHE DE VCPKG
+      # -----------------------------------------------------------------------
+      - name: "💾 Cache vcpkg packages"
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg
+            vcpkg_installed
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-windows-
+
+      # -----------------------------------------------------------------------
+      # 5. BOOTSTRAP VCPKG (Windows)
+      # -----------------------------------------------------------------------
+      - name: "🔧 Bootstrap vcpkg"
+        shell: cmd
+        run: |
+          if not exist "vcpkg\vcpkg.exe" (
+            echo vcpkg no encontrado, clonando y bootstrapping...
+            if not exist "vcpkg" git clone https://github.com/microsoft/vcpkg.git
+            call vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          ) else (
+            echo vcpkg ya disponible (cache hit)
+          )
+          vcpkg\vcpkg.exe version
+
+      # -----------------------------------------------------------------------
+      # 6. INSTALAR DEPENDENCIAS via vcpkg (x64-windows = dinámico /MD)
+      # -----------------------------------------------------------------------
+      - name: "📚 Install vcpkg dependencies (x64-windows triplet)"
+        shell: cmd
+        run: |
+          vcpkg\vcpkg.exe install --triplet=x64-windows
+
+      # -----------------------------------------------------------------------
+      # 7. CONFIGURE con CMake preset (windows-release)
+      # -----------------------------------------------------------------------
+      - name: "⚙️ Configure CMake (windows-release preset)"
+        shell: cmd
+        run: |
+          cmake --preset windows-release
+
+      # -----------------------------------------------------------------------
+      # 8. BUILD (Release configuration)
+      # -----------------------------------------------------------------------
+      - name: "🔨 Build project"
+        shell: cmd
+        run: |
+          cmake --build --preset windows-release --config Release --parallel
+
+      # -----------------------------------------------------------------------
+      # 9. RUN TESTS
+      # -----------------------------------------------------------------------
+      - name: "🧪 Run tests (CTest)"
+        shell: cmd
+        run: |
+          ctest --preset windows-release --output-on-failure --verbose -C Release
+        continue-on-error: false
+
+      # -----------------------------------------------------------------------
+      # 10. PREPARAR ARTEFACTOS (binarios + DLLs de SFML)
+      # -----------------------------------------------------------------------
+      - name: "📦 Prepare binaries for upload"
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          
+          # Copiar ejecutables
+          Copy-Item "build/windows-release/Release/rtype_server.exe" -Destination "artifacts/" -ErrorAction SilentlyContinue
+          Copy-Item "build/windows-release/Release/rtype_client.exe" -Destination "artifacts/" -ErrorAction SilentlyContinue
+          Copy-Item "build/windows-release/Release/rtype_tests.exe" -Destination "artifacts/" -ErrorAction SilentlyContinue
+          
+          # Copiar DLLs de SFML (si están en vcpkg_installed)
+          if (Test-Path "vcpkg_installed/x64-windows/bin/*.dll") {
+            Copy-Item "vcpkg_installed/x64-windows/bin/sfml-*.dll" -Destination "artifacts/" -ErrorAction SilentlyContinue
+          }
+          
+          # Copiar DLLs desde build dir (por si CMake las copió)
+          if (Test-Path "build/windows-release/Release/*.dll") {
+            Copy-Item "build/windows-release/Release/*.dll" -Destination "artifacts/" -ErrorAction SilentlyContinue
+          }
+          
+          Get-ChildItem -Path artifacts/
+
+      # -----------------------------------------------------------------------
+      # 11. UPLOAD ARTEFACTOS
+      # -----------------------------------------------------------------------
+      - name: "⬆️ Upload Windows binaries"
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtype-windows-x64-${{ github.sha }}
+          path: artifacts/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 12. UPLOAD BUILD LOGS (en caso de fallo)
+      # -----------------------------------------------------------------------
+      - name: "📄 Upload build logs (on failure)"
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-windows-${{ github.sha }}
+          path: |
+            build/windows-release/CMakeFiles/CMakeOutput.log
+            build/windows-release/CMakeFiles/CMakeError.log
+            build/windows-release/Testing/Temporary/LastTest.log
+          retention-days: 3
+
+  # ===========================================================================
+  # JOB 3: RELEASE (solo para tags v*)
+  # ===========================================================================
+  release:
+    name: "🚀 Create GitHub Release"
+    needs: [build-ubuntu, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+
+      - name: "⬇️ Download Linux binaries"
+        uses: actions/download-artifact@v4
+        with:
+          name: rtype-linux-x64-${{ github.sha }}
+          path: dist-linux
+
+      - name: "⬇️ Download Windows binaries"
+        uses: actions/download-artifact@v4
+        with:
+          name: rtype-windows-x64-${{ github.sha }}
+          path: dist-windows
+
+      - name: "📦 Create Linux archive"
+        run: |
+          cd dist-linux
+          tar czf ../rtype-${{ github.ref_name }}-linux-x64.tar.gz *
+          cd ..
+
+      - name: "📦 Create Windows archive"
+        run: |
+          cd dist-windows
+          zip -r ../rtype-${{ github.ref_name }}-windows-x64.zip *
+          cd ..
+
+      - name: "🎉 Create GitHub Release"
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rtype-${{ github.ref_name }}-linux-x64.tar.gz
+            rtype-${{ github.ref_name }}-windows-x64.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

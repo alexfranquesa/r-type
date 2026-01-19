@@ -1,0 +1,39 @@
+B-CPP-500_rtype_apendix.pdf
+B-CPP-500_rtype_bootstrap.pdf
+B-CPP-500_rtype.pdf
+G-CPP-500_KickOff_R-Type.pdf
+
+# Build artifacts
+/build/
+/build-*/
+/out/
+
+# Local tooling
+/vcpkg/
+/tools/
+/CMakeUserPresets.json
+
+# Codex (local prompts)
+/codex/
+
+CLAUDE.md
+
+# IDE
+.vscode/
+.idea/
+
+# CMake / vcpkg caches
+**/CMakeCache.txt
+**/CMakeFiles/
+**/Testing/
+**/vcpkg_installed/
+
+# Sprites
+/sprites/*
+!/sprites/*.gif
+!/sprites/*.png
+!/sprites/sprite/
+!/sprites/sprite/*.png
+
+# Codex
+/codex/

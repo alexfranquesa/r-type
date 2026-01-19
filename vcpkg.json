@@ -1,0 +1,29 @@
+{
+  "name": "rtype",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "sfml",
+      "default-features": false,
+      "features": [
+        "graphics",
+        "window",
+        "audio",
+        "network"
+      ]
+    },
+    {
+      "name": "asio",
+      "default-features": true
+    },
+    {
+      "name": "fmt"
+    },
+    {
+      "name": "spdlog"
+    },
+    {
+      "name": "doctest"
+    }
+  ]
+}
