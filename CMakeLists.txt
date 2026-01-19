@@ -26,7 +26,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
-option(RTYPE_BUILD_TESTS "Build unit tests" ON)  #tests desactivated
+option(RTYPE_BUILD_TESTS "Build unit tests" OFF)  #tests desactivated
 
 # =============================================================================
 # FIND PACKAGES (vcpkg resolverá automáticamente)

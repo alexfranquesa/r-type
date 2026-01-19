@@ -324,7 +324,7 @@ jobs:
   release:
     name: "🚀 Create GitHub Release"
     needs: [build-ubuntu, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
